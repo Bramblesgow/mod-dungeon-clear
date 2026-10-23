@@ -69,6 +69,15 @@ namespace DcDungeonQueueFillPlanner
     inline constexpr std::size_t kDpsNeeded     = 3;
     inline constexpr std::size_t kPartySize     = 5;
 
+    // Only an actual playerbot assigned the tank role in the final RDF group
+    // may drive AutoClear. The tank may have joined before queue-fill; it does
+    // not have to be one of the bots provisioned by this job.
+    constexpr bool IsAutoClearBotTank(std::uint8_t roles, bool hasPlayerbotAi,
+                                       bool isHumanSelfBot, bool sameDungeonInstance)
+    {
+        return (roles & kRoleTank) && hasPlayerbotAi && !isHumanSelfBot && sameDungeonInstance;
+    }
+
     // One human already in the queue. The mask is the post-validation value
     // read back from LFGMgr::GetRoles, not the client's raw request.
     struct Human

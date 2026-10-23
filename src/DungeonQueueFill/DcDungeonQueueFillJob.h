@@ -88,6 +88,11 @@ public:
     static std::unique_ptr<DcDungeonQueueFillJob> Observe(Player* player, std::uint8_t roles,
                                                           std::set<std::uint32_t> const& dungeons);
 
+    // If Find Group was clicked again before the first queue validated,
+    // refresh the observed group key and bounded wait, never open a second job.
+    void RefreshObservedIntent(Player* player, std::uint8_t roles,
+                               std::set<std::uint32_t> const& dungeons);
+
     // Drive from the world thread, once per tick.
     void Tick(std::uint32_t diff);
 
@@ -271,6 +276,8 @@ private:
     ObjectGuid _formedGroupGuid;
     bool _handedOff = false;
     bool _autoClearIssued = false;
+    bool _roleCheckBotsPrompted = false;
+    int _lastObservedLfgState = -1;
     // A proposal that fails re-queues the survivors; the core will try again.
     // Sit through exactly one of those before giving up.
     bool _sawProposal = false;

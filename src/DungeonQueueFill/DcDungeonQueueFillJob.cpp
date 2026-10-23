@@ -122,6 +122,25 @@ std::unique_ptr<DcDungeonQueueFillJob> DcDungeonQueueFillJob::Observe(
     return job;
 }
 
+void DcDungeonQueueFillJob::RefreshObservedIntent(
+    Player* player, std::uint8_t roles, std::set<std::uint32_t> const& dungeons)
+{
+    if (!player || _stage != Stage::Observed)
+        return;
+
+    Group const* const group = player->GetGroup();
+    _groupGuid = group ? group->GetGUID() : ObjectGuid::Empty;
+    _lfgGuid = group ? group->GetGUID() : player->GetGUID();
+    _requestedRoles = roles;
+    _requestedDungeonCount = dungeons.size();
+    _stageMs = 0;
+    _lastObservedLfgState = -1;
+    _roleCheckBotsPrompted = false;
+    LOG_INFO("playerbots.dungeonclear",
+             "QUEUEFILL {} refreshed pending queue intent for {} (group {}, {} dungeon(s))",
+             _id, _playerName, group ? "yes" : "no", dungeons.size());
+}
+
 Player* DcDungeonQueueFillJob::FindPlayer() const
 {
     // FindConnectedPlayer, not FindPlayer: a player mid-teleport is on a
@@ -211,16 +230,48 @@ void DcDungeonQueueFillJob::Tick(std::uint32_t diff)
 void DcDungeonQueueFillJob::TickObserved()
 {
     LfgState const state = sLFGMgr->GetState(_lfgGuid);
+    if (_lastObservedLfgState != static_cast<int>(state))
+    {
+        _lastObservedLfgState = static_cast<int>(state);
+        LOG_INFO("playerbots.dungeonclear",
+                 "QUEUEFILL {} observed core LFG state {} (player state {}, group {})",
+                 _id, static_cast<int>(state),
+                 static_cast<int>(sLFGMgr->GetState(_playerGuid)),
+                 _groupGuid ? "yes" : "no");
+    }
     if (state == LFG_STATE_QUEUED)
     {
         EnterStage(Stage::Planning);
         return;
     }
 
-    // A group queue passes through LFG_STATE_ROLECHECK first, so that is a
-    // legitimate intermediate state and not a reason to give up.
+    // A group queue goes through rolecheck first. Playerbots normally answers
+    // its rolecheck packet, but a pre-grouped bot can miss that AI tick. Prompt
+    // existing bots once through their OWN standard playerbots action; never
+    // auto-choose a role for a real player or self-bot.
     if (state == LFG_STATE_ROLECHECK)
+    {
+        if (!_roleCheckBotsPrompted)
+        {
+            _roleCheckBotsPrompted = true;
+            if (Player* leader = FindPlayer())
+                if (Group const* group = leader->GetGroup())
+                    for (GroupReference const* itr = group->GetFirstMember(); itr; itr = itr->next())
+                    {
+                        Player* const member = itr->GetSource();
+                        if (!member || member == leader || IsSelfBot(member))
+                            continue;
+                        if (PlayerbotAI* ai = GET_PLAYERBOT_AI(member))
+                        {
+                            ai->DoSpecificAction("lfg role check", Event("lfg role check", "", leader), true);
+                            LOG_INFO("playerbots.dungeonclear",
+                                     "QUEUEFILL {} prompted rolecheck for existing bot {}",
+                                     _id, member->GetName());
+                        }
+                    }
+        }
         return;
+    }
 
     if (state != LFG_STATE_NONE)
     {
@@ -232,7 +283,16 @@ void DcDungeonQueueFillJob::TickObserved()
     }
 
     if (_stageMs >= SetupTimeoutMs())
-        Release("queue never reached QUEUED", /*notifyPlayer*/ true);
+    {
+        LOG_WARN("playerbots.dungeonclear",
+                 "QUEUEFILL {} queue admission timed out: group state {}, player state {}, group {}, dungeons {}. No bots were spawned",
+                 _id, static_cast<int>(state),
+                 static_cast<int>(sLFGMgr->GetState(_playerGuid)),
+                 _groupGuid ? "yes" : "no",
+                 sLFGMgr->GetSelectedDungeons(_playerGuid).size());
+        Release("queue never reached QUEUED (check rolecheck / LFG join restrictions)",
+                /*notifyPlayer*/ true);
+    }
 }
 
 std::vector<DcDungeonQueueFillPlanner::Human> DcDungeonQueueFillJob::ReadHumans() const
@@ -1146,17 +1206,21 @@ void DcDungeonQueueFillJob::TickFormed()
     if (!_autoClearIssued &&
         DcSettings::GetBool(ObjectGuid::Empty, "DungeonQueueFill.AutoClear"))
     {
-        for (Slot const& slot : _slots)
+        // Select the tank from the FINAL LFG group. A pre-grouped party may
+        // already have its tank bot, leaving only healer/DPS in this job's
+        // _slots. Group roles are authoritative after the LFG rolecheck.
+        for (GroupReference const* itr = grp->GetFirstMember(); itr; itr = itr->next())
         {
-            if (DcDungeonQueueFillPlanner::MaskForRole(slot.plan.role) !=
-                DcDungeonQueueFillPlanner::kRoleTank)
+            Player* const tank = itr->GetSource();
+            if (!tank)
                 continue;
-            Player* const tank = ObjectAccessor::FindPlayer(slot.guid);
-            PlayerbotAI* const tankAI = tank ? GET_PLAYERBOT_AI(tank) : nullptr;
-            if (!tankAI || !tank->GetMap() || !tank->GetMap()->IsDungeon())
-                break;
-            if (player->GetMapId() != tank->GetMapId())
-                break;
+            PlayerbotAI* const tankAI = GET_PLAYERBOT_AI(tank);
+            bool const sameDungeonInstance = player->GetMap() && tank->GetMap() &&
+                player->GetMap() == tank->GetMap() && tank->GetMap()->IsDungeon();
+            if (!DcDungeonQueueFillPlanner::IsAutoClearBotTank(
+                    sLFGMgr->GetRoles(tank->GetGUID()), tankAI != nullptr,
+                    IsSelfBot(tank), sameDungeonInstance))
+                continue;
 
             DcStrategyGate::Reconcile(tank);
             // A map whose wing is chosen per run (Blackrock Spire/Depths) takes it
@@ -1172,7 +1236,13 @@ void DcDungeonQueueFillJob::TickFormed()
                          "QUEUEFILL {} AutoClear: LFG dungeon {} -> run wing '{}'", _id,
                          lfgDungeon, wing->token);
             }
-            tankAI->DoSpecificAction("dc on", Event("dc", "", player), true);
+            if (!tankAI->DoSpecificAction("dc on", Event("dc", "", player), true))
+            {
+                LOG_WARN("playerbots.dungeonclear",
+                         "QUEUEFILL {} AutoClear: dc on declined by bot tank {}",
+                         _id, tank->GetName());
+                break;
+            }
             _autoClearIssued = true;
             LOG_INFO("playerbots.dungeonclear", "QUEUEFILL {} AutoClear: issued `dc on` to {}",
                      _id, tank->GetName());
