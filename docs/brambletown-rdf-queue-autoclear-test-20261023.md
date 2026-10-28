@@ -16,3 +16,15 @@ Split from original Brambletown PR #2. **Draft / not deployed.**
 - In-game staging tests and full GTest run are **not complete**.
 
 No queue observer, rolecheck, or admission recovery changes are included. No production deployment authorized.
+
+## Additional defect: AutoClear does not restart after full-party wipe (observed October 27)
+- After a dungeon group wipe and recovery, the AI tank remained inactive until the player manually issued `.dc on`.
+- Initial AutoClear handoff records `_autoClearIssued = true`. The current queue-fill implementation does not automatically clear that latch after a wipe. This observation suggests a lifecycle gap but does not by itself establish the entire root cause.
+- Investigate whether the formed job is still active after the wipe, how the tank DC run state transitions, and what existing wipe/resurrection events can safely trigger a restart.
+
+### Required behavior and regression tests
+- When AutoClear was automatically enabled for the run, restart the AI tank's Dungeon Clear routine **after a confirmed full wipe and party recovery**, without requiring `.dc on`.
+- Wait until the group is alive/recovered, back in the appropriate instance, and not in combat before retrying; avoid repeated commands during the wipe.
+- Preserve manual `.dc off` opt-out; do not override manual tank control, real players, self-bots, normal encounter pauses, or partially dead groups.
+- Verify a second wipe also recovers, and verify no restarts after group disbanding, leaving the instance, or AutoClear being disabled.
+- Capture logs and a reproducible in-game scenario. **Implementation and test validation pending; no wipe-recovery fix is claimed in this draft.**
