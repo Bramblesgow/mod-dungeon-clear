@@ -124,6 +124,17 @@ void DcDungeonQueueFillManager::OnQueueIntent(Player* player, std::uint8_t roles
     if (!player || dungeons.empty())
         return;
 
+    // A second Find Group click can restart the core's rolecheck while our
+    // original observation is still waiting for QUEUED. Do not drop it with
+    // "already in flight": rebind its queue key and restart only that wait.
+    for (auto const& job : _jobs)
+        if (job->PlayerGuid() == player->GetGUID() &&
+            job->GetStage() == DcDungeonQueueFillJob::Stage::Observed)
+        {
+            job->RefreshObservedIntent(player, roles, dungeons);
+            return;
+        }
+
     bool transient = false;
     std::string const refusal = RefuseReason(player, dungeons, &transient);
     if (!refusal.empty())

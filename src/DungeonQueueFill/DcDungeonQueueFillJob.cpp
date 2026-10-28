@@ -122,6 +122,25 @@ std::unique_ptr<DcDungeonQueueFillJob> DcDungeonQueueFillJob::Observe(
     return job;
 }
 
+void DcDungeonQueueFillJob::RefreshObservedIntent(
+    Player* player, std::uint8_t roles, std::set<std::uint32_t> const& dungeons)
+{
+    if (!player || _stage != Stage::Observed)
+        return;
+
+    Group const* const group = player->GetGroup();
+    _groupGuid = group ? group->GetGUID() : ObjectGuid::Empty;
+    _lfgGuid = group ? group->GetGUID() : player->GetGUID();
+    _requestedRoles = roles;
+    _requestedDungeonCount = dungeons.size();
+    _stageMs = 0;
+    _lastObservedLfgState = -1;
+    _roleCheckBotsPrompted = false;
+    LOG_INFO("playerbots.dungeonclear",
+             "QUEUEFILL {} refreshed pending queue intent for {} (group {}, {} dungeon(s))",
+             _id, _playerName, group ? "yes" : "no", dungeons.size());
+}
+
 Player* DcDungeonQueueFillJob::FindPlayer() const
 {
     // FindConnectedPlayer, not FindPlayer: a player mid-teleport is on a
@@ -211,16 +230,60 @@ void DcDungeonQueueFillJob::Tick(std::uint32_t diff)
 void DcDungeonQueueFillJob::TickObserved()
 {
     LfgState const state = sLFGMgr->GetState(_lfgGuid);
+    if (_lastObservedLfgState != static_cast<int>(state))
+    {
+        _lastObservedLfgState = static_cast<int>(state);
+        LOG_INFO("playerbots.dungeonclear",
+                 "QUEUEFILL {} observed core LFG state {} (player state {}, group {})",
+                 _id, static_cast<int>(state),
+                 static_cast<int>(sLFGMgr->GetState(_playerGuid)),
+                 _groupGuid ? "yes" : "no");
+    }
     if (state == LFG_STATE_QUEUED)
     {
         EnterStage(Stage::Planning);
         return;
     }
 
-    // A group queue passes through LFG_STATE_ROLECHECK first, so that is a
-    // legitimate intermediate state and not a reason to give up.
+    // A group queue goes through rolecheck first. Playerbots normally answers
+    // its rolecheck packet, but a pre-grouped bot can miss that AI tick. Prompt
+    // existing bots once through their OWN standard playerbots action; never
+    // auto-choose a role for a real player or self-bot.
     if (state == LFG_STATE_ROLECHECK)
+    {
+        if (!_roleCheckBotsPrompted)
+        {
+            _roleCheckBotsPrompted = true;
+            if (Player* leader = FindPlayer())
+                if (Group const* group = leader->GetGroup())
+                    for (GroupReference const* itr = group->GetFirstMember(); itr; itr = itr->next())
+                    {
+                        Player* const member = itr->GetSource();
+                        if (!member || member == leader || IsSelfBot(member))
+                            continue;
+                        if (PlayerbotAI* ai = GET_PLAYERBOT_AI(member))
+                        {
+                            ai->DoSpecificAction("lfg role check", Event("lfg role check", "", leader), true);
+                            LOG_INFO("playerbots.dungeonclear",
+                                     "QUEUEFILL {} prompted rolecheck for existing bot {}",
+                                     _id, member->GetName());
+                        }
+                    }
+        }
+        // ROLECHECK can stall indefinitely when a pre-grouped member fails to
+        // select a role. Bound this observation just like the NONE-state path:
+        // no bots have been provisioned, so timing out is safe and diagnostic.
+        if (_stageMs >= SetupTimeoutMs())
+        {
+            LOG_WARN("playerbots.dungeonclear",
+                     "QUEUEFILL {} rolecheck timed out after {} ms (group state {}, player state {}). No bots were spawned",
+                     _id, _stageMs, static_cast<int>(state),
+                     static_cast<int>(sLFGMgr->GetState(_playerGuid)));
+            Release("LFG rolecheck did not complete (check pending group role selections)",
+                    /*notifyPlayer*/ true);
+        }
         return;
+    }
 
     if (state != LFG_STATE_NONE)
     {
@@ -232,7 +295,16 @@ void DcDungeonQueueFillJob::TickObserved()
     }
 
     if (_stageMs >= SetupTimeoutMs())
-        Release("queue never reached QUEUED", /*notifyPlayer*/ true);
+    {
+        LOG_WARN("playerbots.dungeonclear",
+                 "QUEUEFILL {} queue admission timed out: group state {}, player state {}, group {}, dungeons {}. No bots were spawned",
+                 _id, static_cast<int>(state),
+                 static_cast<int>(sLFGMgr->GetState(_playerGuid)),
+                 _groupGuid ? "yes" : "no",
+                 sLFGMgr->GetSelectedDungeons(_playerGuid).size());
+        Release("queue never reached QUEUED (check rolecheck / LFG join restrictions)",
+                /*notifyPlayer*/ true);
+    }
 }
 
 std::vector<DcDungeonQueueFillPlanner::Human> DcDungeonQueueFillJob::ReadHumans() const
