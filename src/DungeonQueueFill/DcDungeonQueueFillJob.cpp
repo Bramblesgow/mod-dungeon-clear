@@ -1206,21 +1206,17 @@ void DcDungeonQueueFillJob::TickFormed()
     if (!_autoClearIssued &&
         DcSettings::GetBool(ObjectGuid::Empty, "DungeonQueueFill.AutoClear"))
     {
-        // Select the tank from the FINAL LFG group. A pre-grouped party may
-        // already have its tank bot, leaving only healer/DPS in this job's
-        // _slots. Group roles are authoritative after the LFG rolecheck.
-        for (GroupReference const* itr = grp->GetFirstMember(); itr; itr = itr->next())
+        for (Slot const& slot : _slots)
         {
-            Player* const tank = itr->GetSource();
-            if (!tank)
+            if (DcDungeonQueueFillPlanner::MaskForRole(slot.plan.role) !=
+                DcDungeonQueueFillPlanner::kRoleTank)
                 continue;
-            PlayerbotAI* const tankAI = GET_PLAYERBOT_AI(tank);
-            bool const sameDungeonInstance = player->GetMap() && tank->GetMap() &&
-                player->GetMap() == tank->GetMap() && tank->GetMap()->IsDungeon();
-            if (!DcDungeonQueueFillPlanner::IsAutoClearBotTank(
-                    sLFGMgr->GetRoles(tank->GetGUID()), tankAI != nullptr,
-                    IsSelfBot(tank), sameDungeonInstance))
-                continue;
+            Player* const tank = ObjectAccessor::FindPlayer(slot.guid);
+            PlayerbotAI* const tankAI = tank ? GET_PLAYERBOT_AI(tank) : nullptr;
+            if (!tankAI || !tank->GetMap() || !tank->GetMap()->IsDungeon())
+                break;
+            if (player->GetMapId() != tank->GetMapId())
+                break;
 
             DcStrategyGate::Reconcile(tank);
             // A map whose wing is chosen per run (Blackrock Spire/Depths) takes it
@@ -1236,13 +1232,7 @@ void DcDungeonQueueFillJob::TickFormed()
                          "QUEUEFILL {} AutoClear: LFG dungeon {} -> run wing '{}'", _id,
                          lfgDungeon, wing->token);
             }
-            if (!tankAI->DoSpecificAction("dc on", Event("dc", "", player), true))
-            {
-                LOG_WARN("playerbots.dungeonclear",
-                         "QUEUEFILL {} AutoClear: dc on declined by bot tank {}",
-                         _id, tank->GetName());
-                break;
-            }
+            tankAI->DoSpecificAction("dc on", Event("dc", "", player), true);
             _autoClearIssued = true;
             LOG_INFO("playerbots.dungeonclear", "QUEUEFILL {} AutoClear: issued `dc on` to {}",
                      _id, tank->GetName());
