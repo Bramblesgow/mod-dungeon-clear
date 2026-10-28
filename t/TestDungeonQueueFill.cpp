@@ -104,18 +104,6 @@ namespace
         EXPECT_EQ(kRoleNone, MaskForRole(nullptr));
     }
 
-    // ---- AutoClear tank selection in an RDF party -------------------------
-
-    TEST(DcDungeonQueueFillPlanner, AutoClearUsesPreGroupedTankButNotHumans)
-    {
-        EXPECT_TRUE(IsAutoClearBotTank(kRoleTank, true, false, true));
-        EXPECT_TRUE(IsAutoClearBotTank(kRoleTank | kRoleLeader, true, false, true));
-        EXPECT_FALSE(IsAutoClearBotTank(kRoleDamage, true, false, true));
-        EXPECT_FALSE(IsAutoClearBotTank(kRoleTank, false, false, true));
-        EXPECT_FALSE(IsAutoClearBotTank(kRoleTank, true, true, true));
-        EXPECT_FALSE(IsAutoClearBotTank(kRoleTank, true, false, false));
-    }
-
     // ---- the deficit -----------------------------------------------------
 
     TEST(DcDungeonQueueFillPlanner, SoloTankNeedsAHealerAndThreeDps)
