@@ -270,6 +270,18 @@ void DcDungeonQueueFillJob::TickObserved()
                         }
                     }
         }
+        // ROLECHECK can stall indefinitely when a pre-grouped member fails to
+        // select a role. Bound this observation just like the NONE-state path:
+        // no bots have been provisioned, so timing out is safe and diagnostic.
+        if (_stageMs >= SetupTimeoutMs())
+        {
+            LOG_WARN("playerbots.dungeonclear",
+                     "QUEUEFILL {} rolecheck timed out after {} ms (group state {}, player state {}). No bots were spawned",
+                     _id, _stageMs, static_cast<int>(state),
+                     static_cast<int>(sLFGMgr->GetState(_playerGuid)));
+            Release("LFG rolecheck did not complete (check pending group role selections)",
+                    /*notifyPlayer*/ true);
+        }
         return;
     }
 
